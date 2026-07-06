@@ -27,14 +27,25 @@ contract Handler is Test {
         return actors[seed % actors.length];
     }
 
+    uint256 public totalDonated; // assets sent to the vault outside deposit/fundRewards
+
     function deposit(uint256 seed, uint256 amt) external {
         address a = _actor(seed);
         amt = bound(amt, 1, 1_000 ether);
+        if (vault.previewDeposit(amt) == 0) return; // vault reverts ZeroShares; skip
         asset.mint(a, amt);
         vm.startPrank(a);
         asset.approve(address(vault), amt);
         vault.deposit(amt);
         vm.stopPrank();
+    }
+
+    /// @dev Adversarial direct transfer: donated assets must never corrupt share pricing.
+    function donate(uint256 amt) external {
+        amt = bound(amt, 1, 100 ether);
+        asset.mint(address(this), amt);
+        asset.transfer(address(vault), amt);
+        totalDonated += amt;
     }
 
     function withdraw(uint256 seed, uint256 shareSeed) external {
@@ -86,16 +97,23 @@ contract InvariantStakeVaultTest is Test {
         targetContract(address(handler));
     }
 
-    /// @notice Core solvency invariant: every asset held is fully accounted as either backing
-    ///         shares (totalPooled) or buffered rewards (rewardBuffer) — never lost or conjured.
+    /// @notice Core solvency invariant: every asset held is accounted in exactly one bucket —
+    ///         settled pool, reward buffer, or the active drip window — plus untracked direct
+    ///         donations. Never lost, never conjured.
     function invariant_assetsFullyAccounted() public view {
-        assertEq(asset.balanceOf(address(vault)), vault.totalPooled() + vault.rewardBuffer());
+        assertEq(
+            asset.balanceOf(address(vault)),
+            vault.totalPooled() + vault.rewardBuffer() + vault.releaseAmount() + handler.totalDonated()
+        );
     }
 
-    /// @notice Shares are never backed by more than the pooled assets (no over-issuance).
-    function invariant_sharesNeverExceedPooledWhenNonEmpty() public view {
-        if (vault.totalSupply() > 0) {
-            assertGe(vault.totalPooled(), 0);
+    /// @notice Shares are always fully backed: redeeming the entire supply never claims more
+    ///         than the vault's redeemable assets, and live shares are never priced off zero.
+    function invariant_sharesFullyBacked() public view {
+        uint256 supply = vault.totalSupply();
+        if (supply > 0) {
+            assertGt(vault.totalAssets(), 0);
+            assertLe(vault.previewRedeem(supply), vault.totalAssets());
         }
     }
 }

@@ -81,7 +81,7 @@ contract MerklioStakeVaultTest is Test {
         assertEq(vault.totalPooled(), 60 ether);
     }
 
-    function test_RewardReleaseLiftsSharePrice() public {
+    function test_RewardsDripLinearlyIntoSharePrice() public {
         _deposit(alice, 100 ether); // 100 shares, price 1.0
 
         vm.startPrank(rewarder);
@@ -89,16 +89,24 @@ contract MerklioStakeVaultTest is Test {
         vault.fundRewards(50 ether);
         vm.stopPrank();
 
-        // still buffered: price unchanged until released
+        // still buffered: price unchanged until the drip starts
         assertEq(vault.previewRedeem(100 ether), 100 ether);
         assertEq(vault.rewardBuffer(), 50 ether);
 
         vm.warp(block.timestamp + INTERVAL);
         vault.performUpkeep("");
 
-        // 150 pooled / 100 shares -> alice's 100 shares now redeem 150
+        // drip just started: nothing vested yet, no price step
         assertEq(vault.rewardBuffer(), 0);
-        assertEq(vault.totalPooled(), 150 ether);
+        assertEq(vault.releaseAmount(), 50 ether);
+        assertEq(vault.previewRedeem(100 ether), 100 ether);
+
+        vm.warp(block.timestamp + INTERVAL / 2); // half the window: half vested
+        assertEq(vault.totalAssets(), 125 ether);
+        assertEq(vault.previewRedeem(100 ether), 125 ether);
+
+        vm.warp(block.timestamp + INTERVAL / 2); // window over: fully vested
+        assertEq(vault.totalAssets(), 150 ether);
         assertEq(vault.previewRedeem(100 ether), 150 ether);
     }
 
@@ -109,11 +117,46 @@ contract MerklioStakeVaultTest is Test {
         vault.fundRewards(100 ether);
         vm.stopPrank();
         vm.warp(block.timestamp + INTERVAL);
-        vault.performUpkeep(""); // price now 2.0 (200 pooled / 100 shares)
+        vault.performUpkeep("");
+        vm.warp(block.timestamp + INTERVAL); // drip fully vested: price 2.0 (200 assets / 100 shares)
 
         uint256 shares = _deposit(bob, 100 ether); // should get ~50 shares
         assertEq(shares, 50 ether);
         assertApproxEqAbs(vault.previewRedeem(shares), 100 ether, 1);
+    }
+
+    function test_Deposit_ZeroSharesReverts() public {
+        _deposit(alice, 100 ether);
+        vm.startPrank(rewarder);
+        asset.approve(address(vault), 100 ether);
+        vault.fundRewards(100 ether);
+        vm.stopPrank();
+        vm.warp(block.timestamp + INTERVAL);
+        vault.performUpkeep("");
+        vm.warp(block.timestamp + INTERVAL); // price 2.0
+
+        // 1 wei * 100e18 shares / 200e18 assets rounds to 0 shares -> must revert, not donate
+        vm.startPrank(bob);
+        asset.approve(address(vault), 1);
+        vm.expectRevert(MerklioStakeVault.ZeroShares.selector);
+        vault.deposit(1);
+        vm.stopPrank();
+    }
+
+    function test_Drip_NoSandwichProfit() public {
+        _deposit(alice, 100 ether);
+        vm.startPrank(rewarder);
+        asset.approve(address(vault), 100 ether);
+        vault.fundRewards(100 ether);
+        vm.stopPrank();
+        vm.warp(block.timestamp + INTERVAL);
+
+        // bob tries the classic sandwich: deposit right before release, exit right after
+        uint256 shares = _deposit(bob, 100 ether);
+        vault.performUpkeep("");
+        vm.prank(bob);
+        uint256 got = vault.withdraw(shares);
+        assertEq(got, 100 ether); // nothing vested yet -> zero instant profit
     }
 
     // ───────────────── roles / gating ─────────────────
@@ -180,7 +223,8 @@ contract MerklioStakeVaultTest is Test {
         vault.fundRewards(100 ether);
         vm.stopPrank();
         vm.warp(block.timestamp + INTERVAL);
-        vault.performUpkeep(""); // 200 pooled, 100 shares
+        vault.performUpkeep("");
+        vm.warp(block.timestamp + INTERVAL); // fully vested: 200 assets, 100 shares
 
         vm.deal(owner, 1 ether);
         vm.prank(owner);
@@ -221,6 +265,29 @@ contract MerklioStakeVaultTest is Test {
         vm.prank(owner);
         vm.expectRevert();
         vault.reportStateCrossChain{value: 0.01 ether}();
+    }
+
+    function test_Receiver_IgnoresStaleReport() public {
+        _deposit(alice, 10 ether);
+        vm.deal(owner, 1 ether);
+        vm.prank(owner);
+        vault.reportStateCrossChain{value: 0.01 ether}();
+        (uint256 pooled,,,,) = receiver.latest();
+        assertEq(pooled, 10 ether);
+
+        // a second report with the same reportedAt (same block.timestamp) is stale: ignored
+        _deposit(bob, 10 ether); // vault now holds 20
+        vm.prank(owner);
+        vault.reportStateCrossChain{value: 0.01 ether}();
+        (pooled,,,,) = receiver.latest();
+        assertEq(pooled, 10 ether); // unchanged
+
+        // a strictly newer report goes through
+        vm.warp(block.timestamp + 1);
+        vm.prank(owner);
+        vault.reportStateCrossChain{value: 0.01 ether}();
+        (pooled,,,,) = receiver.latest();
+        assertEq(pooled, 20 ether);
     }
 
     // ───────────────── UUPS upgrade ─────────────────

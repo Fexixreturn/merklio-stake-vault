@@ -36,6 +36,9 @@ contract MerklioStateReceiver is CCIPReceiver, Ownable2Step {
     }
 
     /// @inheritdoc CCIPReceiver
+    /// @dev CCIP does not guarantee message ordering, so out-of-order (stale) reports with
+    ///      `reportedAt <= latest.reportedAt` are silently ignored — reverting instead would
+    ///      let a stale message wedge CCIP manual-execution retries.
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
         address sender = abi.decode(message.sender, (address));
         if (!allowedSender[message.sourceChainSelector][sender]) {
@@ -43,6 +46,7 @@ contract MerklioStateReceiver is CCIPReceiver, Ownable2Step {
         }
         (uint256 totalPooled, uint256 totalShares, uint256 reportedAt) =
             abi.decode(message.data, (uint256, uint256, uint256));
+        if (reportedAt <= latest.reportedAt) return; // stale or duplicate: keep the newer state
 
         latest = VaultState({
             totalPooled: totalPooled,
