@@ -13,6 +13,7 @@ Built as a focused proof piece. Solidity is my core; this is the kind of contrac
 |---|---|
 | Design & deploy **upgradeable proxy contracts (UUPS)** | `MerklioStakeVault` (ERC1967 proxy + `_authorizeUpgrade`), `script/Deploy.s.sol`, upgrade tests |
 | High-assurance tests with **invariant testing (Foundry)** | `test/invariant/InvariantStakeVault.t.sol` — solvency + full-backing invariants (incl. adversarial donations), 64 runs × 2048 calls |
+| **Security review, static analysis, gas optimization** | [`SECURITY.md`](SECURITY.md) — audit-style writeup of 3 real bugs found & fixed (vacuous invariant, reward-release sandwich, zero-share donation) with the proving test for each; `slither.config.json` (CI static analysis); `.gas-snapshot` (gas regression tracking) |
 | **Access control (Ownable2Step, roles)** | `Ownable2StepUpgradeable` owner + `rewarders` role + `onlyRewarder` |
 | Vault contracts, **liquid-staking tokens, reward distribution** | `mLST` share token; `deposit`/`withdraw` at live exchange rate; buffered → linearly dripped rewards |
 | **Chainlink Automation** | `checkUpkeep` / `performUpkeep` start a reward drip window on an interval |
